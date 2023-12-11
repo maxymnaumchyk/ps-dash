@@ -43,15 +43,10 @@ def getStats(dateFrom, dateTo, site):
             "must": [
                 {
                 "range": {
-                    "from_date": {
-                    "gte": dateFrom
-                    }
-                }
-                },
-                {
-                "range": {
                     "to_date": {
-                    "lte": dateTo
+                    "gte": dateFrom,
+                    "lte": dateTo,
+                    "format": "strict_date_optional_time"
                     }
                 }
                 },
@@ -409,7 +404,7 @@ def pairDetails(pair, period, chdf, baseline, altpaths, hopPositions, pivotFrame
                         html.Div(children=[
                           dbc.Badge(asn, text_color="light", color='rgb(0 35 90)', className="me-2") for asn in baseline["asns_updated"].values.tolist()[0]
                         ], className="text-center"),
-                      ], className='mb-2'),
+                      ], className='mb-1'),
                   ], className='baseline-section'),
                   dbc.Row([
                     html.H2(f"ALTERNATIVE PATHS", className="label text-center mb-1"),
@@ -426,7 +421,7 @@ def pairDetails(pair, period, chdf, baseline, altpaths, hopPositions, pivotFrame
                           
                           html.Div(children=[
                             dbc.Badge(asn, text_color="light", color=getColor(asn, diffs), className="me-2") for asn in path])
-                        ], className="text-center mb-2") for path, hash_freq, path_always_reaches_dest in altpaths[["asns_updated","hash_freq","path_always_reaches_dest"]].values.tolist()
+                        ], className="text-center mb-1") for path, hash_freq, path_always_reaches_dest in altpaths[["asns_updated","hash_freq","path_always_reaches_dest"]].values.tolist()
                     ])
                     ], justify="center", align="center")
                 ], className="bordered-box mt-1")

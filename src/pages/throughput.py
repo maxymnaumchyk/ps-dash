@@ -18,6 +18,7 @@ import utils.helpers as hp
 from utils.helpers import timer
 from model.Alarms import Alarms
 import model.queries as qrs
+from utils.parquet import Parquet
 
 
 urllib3.disable_warnings()
@@ -47,60 +48,67 @@ def convertTime(ts):
     return int((stripped - datetime(1970, 1, 1)).total_seconds()*1000)
 
 
-
+# TODO: move that query to queries.py
 @timer
 def getRawDataFromES(src, dest, ipv6, dateFrom, dateTo):
+    pq = Parquet()
+    metaDf = pq.readFile('parquet/raw/metaDf.parquet')
+    sips = metaDf[(metaDf['site'] == src) | (metaDf['netsite'] == src)]['ip'].values.tolist()
+    sips = [ip.upper() for ip in sips] + [ip.lower() for ip in sips]
+    dips = metaDf[(metaDf['site'] == dest) | (metaDf['netsite'] == dest)]['ip'].values.tolist()
+    dips = [ip.upper() for ip in dips] + [ip.lower() for ip in dips]
 
-    metaDf = qrs.getMetaData()
-    sips = metaDf[(metaDf['site'] == src)]['ip'].values.tolist()
-    dips = metaDf[metaDf['site'] == dest]['ip'].values.tolist()
-
-    q = {
-        "query" : {  
-            "bool" : {
-            "must" : [
-                  {
-                    "range": {
-                        "timestamp": {
-                        "gte": convertTime(dateFrom),
-                        "lte": convertTime(dateTo)
+    if len(sips) > 0 or len(dips) > 0:
+      q = {
+          "query" : {  
+              "bool" : {
+              "must" : [
+                    {
+                      "range": {
+                          "timestamp": {
+                          "gte": convertTime(dateFrom),
+                          "lte": convertTime(dateTo),
+                          "format": "epoch_millis"
+                          }
                         }
+                    },
+                    {
+                      "terms" : {
+                        "src": sips
                       }
-                  },
-                  {
-                    "terms" : {
-                      "src": sips
+                    },
+                    {
+                      "terms" : {
+                        "dest": dips
+                      }
+                    },
+                    {
+                      "term": {
+                          "ipv6": {
+                            "value": ipv6
+                          }
+                      }
                     }
-                  },
-                  {
-                    "terms" : {
-                      "dest": dips
-                    }
-                  },
-                  {
-                    "term": {
-                        "ipv6": {
-                          "value": ipv6
-                        }
-                    }
-                  }
-              ]
+                ]
+              }
             }
           }
-        }
-    # print(str(q).replace("\'", "\""))
+      # print(str(q).replace("\'", "\""))
 
-    result = scan(client=hp.es,index='ps_throughput',query=q)
-    data = []
+      result = scan(client=hp.es,index='ps_throughput',query=q)
+      data = []
 
-    for item in result:
-        data.append(item['_source'])
+      for item in result:
+          data.append(item['_source'])
 
-    df = pd.DataFrame(data)
-    df['pair'] = df['src']+'->'+df['dest']
-    df['dt'] = pd.to_datetime(df['timestamp'], unit='ms')
+      df = pd.DataFrame(data)
 
-    return df
+      df['pair'] = df['src']+'->'+df['dest']
+      df['dt'] = df['timestamp']
+      return df
+
+    else: print(f'No IPs found for the selected sites {src} and {dest} {ipv6}')
+    
 
 
 @timer
@@ -124,29 +132,6 @@ def buildPlot(df):
 
 
 @timer
-def buildSummary(alarm):
-  desc = 'Bandwidth decreased' if alarm['event'].startswith('bandwidth decreased') else 'Bandwidth increased'
-
-  if alarm['event'] in ['bandwidth decreased', 'bandwidth increased']:
-    return f"{desc} for the {alarm['source']['ipv']} links between sites {alarm['source']['src_site']} and {alarm['source']['dest_site']}.\
-          Current throughput is {alarm['source']['last3days_avg']} MB, dropped by {alarm['source']['%change']}% with respect to the 21-day-average. "
-
-  elif alarm['event'] in ['bandwidth decreased from/to multiple sites', 'bandwidth increased from/to multiple sites']:
-    temp = f"{desc} for the {alarm['source']['ipv']} links between site {alarm['source']['site']}"
-    firstIn = False
-    if alarm['source']['dest_sites']:
-      firstIn = True
-      temp+=f" to sites: {'  |  '.join(alarm['source']['dest_sites'])} change in percentages: {('  |  '.join([str(l) for l in alarm['source']['dest_change']]))}"
-    if alarm['source']['src_sites']:
-      if firstIn:
-        temp+= ' and '
-      temp += f"from sites: {'  |  '.join(alarm['source']['src_sites'])}, change in percentages: {('  |  '.join([str(l) for l in alarm['source']['src_change']]))}"
-
-    temp += " with respect to the 21-day average."
-    return temp
-
-
-@timer
 def getSitePairs(alarm):
   sitePairs = []
   event = alarm['event']
@@ -155,7 +140,7 @@ def getSitePairs(alarm):
     sitePairs = [{'src_site': alarm['source']['src_site'],
                 'dest_site': alarm['source']['dest_site'],
                 'ipv6': alarm['source']['ipv6'],
-                'change':  alarm['source']['%change']}]
+                'change':  alarm['source']['change']}]
 
   elif event in ['bandwidth decreased from/to multiple sites', 'bandwidth increased from/to multiple sites']:
     for i,s in enumerate(alarm['source']['dest_sites']):
@@ -182,12 +167,13 @@ def layout(q=None, **other_unknown_query_strings):
     alarm = qrs.getAlarm(q)
     print('URL query:', q)
     print()
-    print('Alarm content:', alarm)
+
     sitePairs = getSitePairs(alarm)
     alarmData = alarm['source']
     dateFrom, dateTo = hp.getPriorNhPeriod(alarmData['to'])
     print('Alarm\'s content:', alarmData)
     pivotFrames = alarmsInst.loadData(dateFrom, dateTo)[1]
+
     data = alarmsInst.getOtherAlarms(
                                     currEvent=alarm['event'],
                                     alarmEnd=alarmData['to'],
@@ -302,7 +288,7 @@ def buildGraphComponents(alarmData, dateFrom, dateTo, event, pivotFrames):
   
   data = alarmsInst.getOtherAlarms(currEvent=event, alarmEnd=dateTo, pivotFrames=pivotFrames,
                                    src_site=alarmData['src_site'], dest_site=alarmData['dest_site'])
-  print(data)
+
   otherAlarms = alarmsInst.formatOtherAlarms(data)
 
   return html.Div(children=[
@@ -340,7 +326,7 @@ def buildGraphComponents(alarmData, dateFrom, dateTo, event, pivotFrames):
           ], className="", justify="evenly"),
 
           dbc.Row(
-            html.Div(buildDataTable(df), className='single-table p-4'),
+            html.Div(buildDataTable(df), className='single-table p-2'),
           justify="evenly")
 
         ], className='boxwithshadow')
@@ -348,6 +334,11 @@ def buildGraphComponents(alarmData, dateFrom, dateTo, event, pivotFrames):
 
 
 def buildDataTable(df):
+    columns = ['dt', 'pair', 'throughput', 'src_host', 'dest_host',
+              'retransmits', 'src_site', 'src_netsite', 'src_rcsite', 'dest_site',
+              'dest_netsite', 'dest_rcsite', 'src_production', 'dest_production']
+
+    df = df[columns]
     return html.Div(dash_table.DataTable(
             data=df.to_dict('records'),
             columns=[{"name": i, "id": i} for i in df.columns],
